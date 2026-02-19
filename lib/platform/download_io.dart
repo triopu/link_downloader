@@ -7,6 +7,18 @@ typedef ProgressCallback = void Function(int received, int total);
 
 typedef BytesDownloader = Future<List<int>> Function();
 
+Future<String> prepareOutputFolder({
+  required String baseFolderPath,
+  required String folderName,
+}) async {
+  final outputFolderPath = p.join(baseFolderPath, folderName);
+  final directory = Directory(outputFolderPath);
+  if (!await directory.exists()) {
+    await directory.create(recursive: true);
+  }
+  return outputFolderPath;
+}
+
 Future<void> downloadFile({
   required Dio dio,
   required String url,

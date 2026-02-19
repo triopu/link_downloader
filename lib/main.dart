@@ -4,6 +4,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 
+import 'platform/default_folder.dart';
 import 'platform/download.dart';
 import 'platform/file_reader.dart';
 
@@ -32,9 +33,10 @@ class LinkDownloaderHome extends StatefulWidget {
 }
 
 class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
-  static const String photoColumnName = 'Take a Photo';
-  static const String nameColumnName = 'Name';
-  static const String emailColumnName = 'E-mail';
+  static const int storeNameColumnIndex = 0;
+  static const int imageUrlColumnIndex = 3;
+  static const int createdOnColumnIndex = 9;
+  static const String folderSuffix = 'ZYNsampling';
 
   PlatformFile? _selectedFile;
   String? _folderPath;
@@ -50,6 +52,23 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
   final List<String> _logs = [];
   final Dio _dio = Dio();
 
+  @override
+  void initState() {
+    super.initState();
+    _initializeDefaultFolder();
+  }
+
+  Future<void> _initializeDefaultFolder() async {
+    if (kIsWeb) return;
+
+    final folder = await getDefaultDownloadFolder();
+    if (!mounted || folder == null || folder.isEmpty) return;
+
+    setState(() {
+      _folderPath = folder;
+    });
+  }
+
   void _addLog(String message) {
     setState(() {
       _logs.insert(0, message);
@@ -57,20 +76,15 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
   }
 
   Future<void> _pickFile() async {
-    final result = await FilePicker.platform.pickFiles(type: FileType.custom, allowedExtensions: const ['xlsx', 'xls', 'csv'], withData: kIsWeb);
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: const ['xlsx', 'xls', 'csv'],
+      withData: kIsWeb,
+    );
     if (result == null || result.files.isEmpty) return;
 
     setState(() {
       _selectedFile = result.files.single;
-    });
-  }
-
-  Future<void> _pickFolder() async {
-    final path = await FilePicker.platform.getDirectoryPath();
-    if (path == null || path.isEmpty) return;
-
-    setState(() {
-      _folderPath = path;
     });
   }
 
@@ -81,7 +95,16 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
     }
 
     if (!kIsWeb && (_folderPath == null || _folderPath!.isEmpty)) {
-      _addLog('Please select a download folder.');
+      final autoFolder = await getDefaultDownloadFolder();
+      if (autoFolder != null && autoFolder.isNotEmpty) {
+        setState(() {
+          _folderPath = autoFolder;
+        });
+      }
+    }
+
+    if (!kIsWeb && (_folderPath == null || _folderPath!.isEmpty)) {
+      _addLog('Could not determine the default Downloads folder on this device.');
       return;
     }
 
@@ -103,39 +126,55 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
         return;
       }
 
-      final header = rows.first.map((e) => e?.toString().trim() ?? '').toList();
-      final photoIndex = _findColumnIndex(header, photoColumnName);
-      final nameIndex = _findColumnIndex(header, nameColumnName);
-      final emailIndex = _findColumnIndex(header, emailColumnName);
-
-      if (photoIndex == -1) {
-        _addLog('Column "$photoColumnName" was not found in the header row.');
-        return;
-      }
-
-      if (nameIndex == -1 || emailIndex == -1) {
-        _addLog('Columns "$nameColumnName" and/or "$emailColumnName" were not found.');
-        return;
+      final runDate = _formatYyyyMmDd(DateTime.now());
+      final runFolderName = '${runDate}_$folderSuffix';
+      String? outputFolderPath = _folderPath;
+      if (!kIsWeb) {
+        outputFolderPath = await prepareOutputFolder(
+          baseFolderPath: _folderPath!,
+          folderName: runFolderName,
+        );
+        _addLog('Saving downloads to: $outputFolderPath');
       }
 
       final dataRows = rows.skip(1).toList();
       final tasks = <_DownloadTask>[];
+      final imageCounters = <String, int>{};
 
       for (var i = 0; i < dataRows.length; i++) {
         final row = dataRows[i];
-        if (row.length <= photoIndex) continue;
+        if (row.length <= imageUrlColumnIndex) continue;
 
-        final rawUrl = row[photoIndex]?.toString().trim() ?? '';
+        final rawUrl = row[imageUrlColumnIndex]?.toString().trim() ?? '';
         if (rawUrl.isEmpty) continue;
 
-        final name = _safeCell(row, nameIndex);
-        final email = _safeCell(row, emailIndex);
+        final storeName = _safeCell(row, storeNameColumnIndex);
+        final createdOn = _parseCreatedOn(row, createdOnColumnIndex);
+        if (createdOn == null) {
+          _addLog('Skipping row ${i + 2}: invalid "Created on" value in column J.');
+          continue;
+        }
 
-        tasks.add(_DownloadTask(url: rawUrl, name: name, email: email));
+        final createdDate = _formatYyyyMmDd(createdOn);
+        final storeKey = storeName.toLowerCase();
+        final counterKey = '$createdDate|$storeKey';
+        final imageCount = (imageCounters[counterKey] ?? 0) + 1;
+        imageCounters[counterKey] = imageCount;
+
+        tasks.add(
+          _DownloadTask(
+            url: rawUrl,
+            fileName: _buildImageName(
+              createdDate: createdDate,
+              storeName: storeName,
+              imageCount: imageCount,
+            ),
+          ),
+        );
       }
 
       if (tasks.isEmpty) {
-        _addLog('No download links found in "$photoColumnName" column.');
+        _addLog('No valid download links found in column D.');
         return;
       }
 
@@ -144,7 +183,7 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
       });
 
       if (kIsWeb && _zipOnWeb) {
-        await _downloadAsZip(tasks);
+        await _downloadAsZip(tasks, runFolderName: runFolderName);
       } else {
         for (var i = 0; i < tasks.length; i++) {
           final task = tasks[i];
@@ -154,7 +193,7 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
             _currentFileName = '';
           });
 
-          await _downloadOne(task, _folderPath);
+          await _downloadOne(task, outputFolderPath);
         }
       }
 
@@ -177,7 +216,7 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
     }
   }
 
-  Future<void> _downloadAsZip(List<_DownloadTask> tasks) async {
+  Future<void> _downloadAsZip(List<_DownloadTask> tasks, {required String runFolderName}) async {
     final archive = Archive();
 
     for (var i = 0; i < tasks.length; i++) {
@@ -194,8 +233,8 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
         continue;
       }
 
-      final originalName = _filenameFromUrl(uri, fallbackIndex: _currentIndex);
-      final filename = _buildOutputName(task.name, task.email, originalName);
+      final filename = task.fileName;
+      final zipEntryPath = '$runFolderName/$filename';
 
       setState(() {
         _currentFileName = filename;
@@ -212,7 +251,7 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
             });
           },
         );
-        archive.addFile(ArchiveFile(filename, bytes.length, bytes));
+        archive.addFile(ArchiveFile(zipEntryPath, bytes.length, bytes));
         setState(() {
           _completedCount += 1;
         });
@@ -229,14 +268,7 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
       return;
     }
 
-    final now = DateTime.now();
-    final zipName =
-        'downloads_${now.year.toString().padLeft(4, '0')}'
-        '${now.month.toString().padLeft(2, '0')}'
-        '${now.day.toString().padLeft(2, '0')}_'
-        '${now.hour.toString().padLeft(2, '0')}'
-        '${now.minute.toString().padLeft(2, '0')}'
-        '${now.second.toString().padLeft(2, '0')}.zip';
+    final zipName = '$runFolderName.zip';
 
     await saveBytes(fileName: zipName, bytes: zipBytes);
     _addLog('ZIP downloaded: $zipName');
@@ -249,8 +281,7 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
       return;
     }
 
-    final originalName = _filenameFromUrl(uri, fallbackIndex: _currentIndex);
-    final filename = _buildOutputName(task.name, task.email, originalName);
+    final filename = task.fileName;
 
     setState(() {
       _currentFileName = filename;
@@ -278,24 +309,14 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
     }
   }
 
-  String _filenameFromUrl(Uri uri, {required int fallbackIndex}) {
-    final pathSegments = uri.pathSegments;
-    if (pathSegments.isEmpty) {
-      return 'file_$fallbackIndex';
-    }
-    final last = pathSegments.last;
-    if (last.isEmpty || last == '/') {
-      return 'file_$fallbackIndex';
-    }
-    return last;
-  }
-
-  String _buildOutputName(String name, String email, String originalName) {
-    final safeName = _sanitizeForFilename(name);
-    final safeEmail = _sanitizeForFilename(email);
-    final safeOriginal = _sanitizeForFilename(originalName);
-    final parts = [safeName, safeEmail, safeOriginal].where((p) => p.isNotEmpty).toList();
-    return parts.join('_');
+  String _buildImageName({
+    required String createdDate,
+    required String storeName,
+    required int imageCount,
+  }) {
+    final safeStoreName = _sanitizeForFilename(storeName);
+    final storeSegment = safeStoreName.isEmpty ? 'Store' : safeStoreName;
+    return '${createdDate}_${storeSegment}_$imageCount.jpeg';
   }
 
   String _sanitizeForFilename(String input) {
@@ -310,12 +331,62 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
     return row[index]?.toString().trim() ?? '';
   }
 
-  int _findColumnIndex(List<String> header, String columnName) {
-    final target = columnName.toLowerCase();
-    for (var i = 0; i < header.length; i++) {
-      if (header[i].toLowerCase() == target) return i;
+  DateTime? _parseCreatedOn(List<dynamic> row, int index) {
+    if (index < 0 || index >= row.length) return null;
+    final value = row[index];
+    if (value == null) return null;
+
+    if (value is DateTime) {
+      return DateTime(value.year, value.month, value.day);
     }
-    return -1;
+
+    if (value is num) {
+      final days = value.floor();
+      final adjustedDays = days >= 60 ? days - 1 : days;
+      final date = DateTime.utc(1899, 12, 31).add(Duration(days: adjustedDays));
+      return DateTime(date.year, date.month, date.day);
+    }
+
+    final text = value.toString().trim();
+    if (text.isEmpty) return null;
+
+    final parsed = DateTime.tryParse(text);
+    if (parsed != null) {
+      final normalized = parsed.add(const Duration(hours: 12));
+      return DateTime(normalized.year, normalized.month, normalized.day);
+    }
+
+    final ymd = RegExp(r'^(\d{4})[/-](\d{1,2})[/-](\d{1,2})').firstMatch(text);
+    if (ymd != null) {
+      final year = int.tryParse(ymd.group(1)!);
+      final month = int.tryParse(ymd.group(2)!);
+      final day = int.tryParse(ymd.group(3)!);
+      if (year != null && month != null && day != null) {
+        return DateTime(year, month, day);
+      }
+    }
+
+    final dmy = RegExp(r'^(\d{1,2})[/-](\d{1,2})[/-](\d{2,4})').firstMatch(text);
+    if (dmy != null) {
+      final day = int.tryParse(dmy.group(1)!);
+      final month = int.tryParse(dmy.group(2)!);
+      var year = int.tryParse(dmy.group(3)!);
+      if (year != null && year < 100) {
+        year += 2000;
+      }
+      if (year != null && month != null && day != null) {
+        return DateTime(year, month, day);
+      }
+    }
+
+    return null;
+  }
+
+  String _formatYyyyMmDd(DateTime date) {
+    final year = date.year.toString().padLeft(4, '0');
+    final month = date.month.toString().padLeft(2, '0');
+    final day = date.day.toString().padLeft(2, '0');
+    return '$year$month$day';
   }
 
   double get _overallProgress {
@@ -331,7 +402,7 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
   @override
   Widget build(BuildContext context) {
     final fileLabel = _selectedFile == null ? 'No file selected' : _selectedFile!.name;
-    final folderLabel = kIsWeb ? 'Browser downloads folder' : (_folderPath ?? 'No folder selected');
+    final folderLabel = kIsWeb ? 'Browser downloads folder' : (_folderPath ?? 'Detecting default Downloads folder...');
 
     return Scaffold(
       appBar: AppBar(title: const Text('PMFTC Link Downloader')),
@@ -358,15 +429,17 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
                       ],
                     ),
                     const SizedBox(height: 16),
-                    const Text('2) Select download folder'),
+                    const Text('2) Download folder'),
                     const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(child: Text(folderLabel, overflow: TextOverflow.ellipsis)),
-                        const SizedBox(width: 12),
-                        ElevatedButton(onPressed: kIsWeb || _isRunning ? null : _pickFolder, child: const Text('Choose Folder')),
-                      ],
-                    ),
+                    Text(folderLabel, overflow: TextOverflow.ellipsis),
+                    if (!kIsWeb)
+                      const Padding(
+                        padding: EdgeInsets.only(top: 6),
+                        child: Text(
+                          'The app always uses your system Downloads folder automatically.',
+                          style: TextStyle(fontSize: 12),
+                        ),
+                      ),
                     if (kIsWeb)
                       Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
@@ -433,9 +506,8 @@ class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
 }
 
 class _DownloadTask {
-  _DownloadTask({required this.url, required this.name, required this.email});
+  _DownloadTask({required this.url, required this.fileName});
 
   final String url;
-  final String name;
-  final String email;
+  final String fileName;
 }

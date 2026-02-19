@@ -7,6 +7,13 @@ typedef ProgressCallback = void Function(int received, int total);
 
 typedef BytesDownloader = Future<List<int>> Function();
 
+Future<String> prepareOutputFolder({
+  required String baseFolderPath,
+  required String folderName,
+}) async {
+  return folderName;
+}
+
 Future<void> downloadFile({
   required Dio dio,
   required String url,
