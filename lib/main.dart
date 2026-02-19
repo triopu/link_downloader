@@ -32,7 +32,7 @@ class LinkDownloaderHome extends StatefulWidget {
 }
 
 class _LinkDownloaderHomeState extends State<LinkDownloaderHome> {
-  static const String photoColumnName = 'Photo Upload';
+  static const String photoColumnName = 'Take a Photo';
   static const String nameColumnName = 'Name';
   static const String emailColumnName = 'E-mail';
 
