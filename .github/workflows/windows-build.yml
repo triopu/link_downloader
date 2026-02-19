@@ -1,0 +1,37 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    branches:
+      - main
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+
+      - name: Flutter Pub Get
+        run: flutter pub get
+        working-directory: link_downloader
+
+      - name: Enable Windows Desktop
+        run: flutter config --enable-windows-desktop
+
+      - name: Build Windows
+        run: flutter build windows
+        working-directory: link_downloader
+
+      - name: Upload EXE
+        uses: actions/upload-artifact@v4
+        with:
+          name: PMFTC-Link-Downloader-Windows
+          path: link_downloader/build/windows/runner/Release/
